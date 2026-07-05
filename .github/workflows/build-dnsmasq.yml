@@ -46,13 +46,14 @@ jobs:
         id: release_check
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
 
           TAG="${{ steps.version.outputs.tag }}"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Release $TAG already exists, skip build."
           else
@@ -254,6 +255,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -263,5 +265,6 @@ jobs:
 
           gh release create "$TAG" \
             release-assets/* \
+            --repo "$GH_REPO" \
             --title "dnsmasq ${VERSION}" \
             --notes "Auto-built dnsmasq ${VERSION} from official source: https://thekelleys.org.uk/dnsmasq/dnsmasq-${VERSION}.tar.xz"
