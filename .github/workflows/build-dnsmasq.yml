@@ -1,4 +1,4 @@
-name: Build latest dnsmasq
+name: Build latest Dnsmasq
 
 on:
   workflow_dispatch:
