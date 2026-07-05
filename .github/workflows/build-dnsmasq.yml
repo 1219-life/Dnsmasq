@@ -1,4 +1,4 @@
-name: Build latest Dnsmasq
+name: Build latest dnsmasq
 
 on:
   workflow_dispatch:
@@ -273,13 +273,22 @@ jobs:
             shasum -a 256 "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
           fi
 
+      - name: Check package files
+        shell: bash
+        run: |
+          ls -lh *.tar.gz *.sha256
+
       - name: Upload artifact to Actions
         uses: actions/upload-artifact@v4
+        timeout-minutes: 10
         with:
           name: dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
           path: |
             dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
             dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   release:
     name: Create GitHub Release
@@ -292,6 +301,7 @@ jobs:
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
+        timeout-minutes: 10
         with:
           path: release-assets
           merge-multiple: true
@@ -300,6 +310,7 @@ jobs:
         shell: bash
         run: |
           find release-assets -type f -maxdepth 2 -print
+          ls -lh release-assets
 
       - name: Create GitHub Release
         env:
