@@ -39,7 +39,7 @@ jobs:
           echo "Latest dnsmasq version: $version"
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "tag=dnsmasq-v$version" >> "$GITHUB_OUTPUT"
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
 
       - name: Check release exists
@@ -62,7 +62,7 @@ jobs:
           fi
 
   build:
-    name: Build ${{ matrix.artifact_name }}
+    name: Build dnsmasq ${{ matrix.artifact_name }}
     needs: detect
     if: needs.detect.outputs.release_exists == 'false'
 
@@ -73,21 +73,25 @@ jobs:
           - os: ubuntu-24.04
             platform: linux
             artifact_name: linux-amd64
+            target: linux/amd64
             docker_platform: linux/amd64
 
           - os: ubuntu-24.04
             platform: linux
             artifact_name: linux-arm64
+            target: linux/arm64
             docker_platform: linux/arm64
 
           - os: macos-26
             platform: macos
             artifact_name: macos-arm64
+            target: macos/arm64
             docker_platform: ""
 
           - os: macos-26-intel
             platform: macos
             artifact_name: macos-amd64
+            target: macos/amd64
             docker_platform: ""
 
     runs-on: ${{ matrix.os }}
@@ -169,6 +173,8 @@ jobs:
               cp CHANGELOG /out/CHANGELOG || true
               cp COPYING /out/COPYING || true
               cp COPYING-v3 /out/COPYING-v3 || true
+
+              ldd /out/dnsmasq > /out/ldd-dnsmasq.txt || true
             "
 
       - name: Build dnsmasq on macOS
@@ -193,10 +199,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          NAME="dnsmasq"
           VERSION="${{ needs.detect.outputs.version }}"
+          BASE_URL="${{ needs.detect.outputs.base_url }}"
           PLATFORM="${{ matrix.platform }}"
           ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          TARGET="${{ matrix.target }}"
+          BUILD="${{ matrix.os }}"
           PACKAGE_NAME="dnsmasq-${VERSION}-${ARTIFACT_NAME}"
+          SOURCE_URL="${BASE_URL}/dnsmasq-${VERSION}.tar.xz"
+          BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
           mkdir -p "$PACKAGE_NAME"
 
@@ -206,6 +218,7 @@ jobs:
             cp "out-${ARTIFACT_NAME}/CHANGELOG" "$PACKAGE_NAME/CHANGELOG" || true
             cp "out-${ARTIFACT_NAME}/COPYING" "$PACKAGE_NAME/COPYING" || true
             cp "out-${ARTIFACT_NAME}/COPYING-v3" "$PACKAGE_NAME/COPYING-v3" || true
+            cp "out-${ARTIFACT_NAME}/ldd-dnsmasq.txt" "$PACKAGE_NAME/ldd-dnsmasq.txt" || true
           else
             cp "dnsmasq-${VERSION}/src/dnsmasq" "$PACKAGE_NAME/dnsmasq"
             cp "dnsmasq-${VERSION}/dnsmasq.conf.example" "$PACKAGE_NAME/dnsmasq.conf.example" || true
@@ -215,6 +228,42 @@ jobs:
           fi
 
           chmod +x "$PACKAGE_NAME/dnsmasq"
+
+          cat > "$PACKAGE_NAME/manifest.json" <<EOF
+          {
+            "name": "${NAME}",
+            "version": "${VERSION}",
+            "target": "${TARGET}",
+            "build": "${BUILD}",
+            "artifact": "${ARTIFACT_NAME}",
+            "source_url": "${SOURCE_URL}",
+            "built_at": "${BUILT_AT}",
+            "files": {
+              "dnsmasq": "dnsmasq",
+              "config_example": "dnsmasq.conf.example"
+            }
+          }
+          EOF
+
+          cat > "$PACKAGE_NAME/README-RUNTIME.md" <<EOF
+          # dnsmasq ${VERSION} runtime
+
+          Built from official source:
+
+          ${SOURCE_URL}
+
+          ## Files
+
+          - dnsmasq
+          - dnsmasq.conf.example
+          - manifest.json
+
+          ## Check
+
+          \`\`\`bash
+          ./dnsmasq --version
+          \`\`\`
+          EOF
 
           tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
 
