@@ -1,0 +1,93 @@
+name: Build latest dnsmasq
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"   # 每天 UTC 02:00 自动检查一次
+
+jobs:
+  build:
+    name: Build dnsmasq latest
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            xz-utils \
+            pkg-config \
+            libidn2-dev \
+            libnettle-dev \
+            libdbus-1-dev \
+            libnetfilter-conntrack-dev \
+            gettext
+
+      - name: Detect latest dnsmasq version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_URL="https://thekelleys.org.uk/dnsmasq"
+
+          latest_file="$(curl -fsSL "$BASE_URL/" | grep -oE 'LATEST_IS_[0-9]+\.[0-9]+[^"< ]*' | head -n1)"
+          version="${latest_file#LATEST_IS_}"
+
+          if [ -z "$version" ]; then
+            echo "Failed to detect latest dnsmasq version"
+            exit 1
+          fi
+
+          echo "Latest dnsmasq version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Download source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="${{ steps.version.outputs.base_url }}"
+
+          curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz"
+          curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz.asc" || true
+
+          tar -xf "dnsmasq-${VERSION}.tar.xz"
+
+      - name: Build dnsmasq
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          cd "dnsmasq-${VERSION}"
+
+          make -j"$(nproc)"
+
+          ./src/dnsmasq --version
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+
+          cp "dnsmasq-${VERSION}/src/dnsmasq" "dist/dnsmasq"
+          cp "dnsmasq-${VERSION}/dnsmasq.conf.example" "dist/dnsmasq.conf.example" || true
+          cp "dnsmasq-${VERSION}/CHANGELOG" "dist/CHANGELOG" || true
+          cp "dnsmasq-${VERSION}/COPYING" "dist/COPYING" || true
+          cp "dnsmasq-${VERSION}/COPYING-v3" "dist/COPYING-v3" || true
+
+          tar -C dist -czf "dnsmasq-${VERSION}-linux-amd64.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsmasq-${{ steps.version.outputs.version }}-linux-amd64
+          path: dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
