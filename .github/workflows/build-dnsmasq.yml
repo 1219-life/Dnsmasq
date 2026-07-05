@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "0 2 * * *"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build dnsmasq latest
@@ -44,8 +47,28 @@ jobs:
           echo "Latest dnsmasq version: $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check release exists
+        id: release_check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists, skip build and release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG does not exist, continue."
+          fi
 
       - name: Download source
+        if: steps.release_check.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -54,9 +77,12 @@ jobs:
           BASE_URL="${{ steps.version.outputs.base_url }}"
 
           curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz"
+          curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz.asc" || true
+
           tar -xf "dnsmasq-${VERSION}.tar.xz"
 
       - name: Build dnsmasq
+        if: steps.release_check.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -68,6 +94,7 @@ jobs:
           ./src/dnsmasq --version
 
       - name: Package artifact
+        if: steps.release_check.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -79,11 +106,34 @@ jobs:
           cp "dnsmasq-${VERSION}/dnsmasq.conf.example" "dist/dnsmasq.conf.example" || true
           cp "dnsmasq-${VERSION}/CHANGELOG" "dist/CHANGELOG" || true
           cp "dnsmasq-${VERSION}/COPYING" "dist/COPYING" || true
+          cp "dnsmasq-${VERSION}/COPYING-v3" "dist/COPYING-v3" || true
 
           tar -C dist -czf "dnsmasq-${VERSION}-linux-amd64.tar.gz" .
 
-      - name: Upload artifact
+          sha256sum "dnsmasq-${VERSION}-linux-amd64.tar.gz" > "dnsmasq-${VERSION}-linux-amd64.tar.gz.sha256"
+
+      - name: Upload artifact to Actions
+        if: steps.release_check.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: dnsmasq-${{ steps.version.outputs.version }}-linux-amd64
-          path: dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+          path: |
+            dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+
+      - name: Create GitHub Release
+        if: steps.release_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          gh release create "$TAG" \
+            "dnsmasq-${VERSION}-linux-amd64.tar.gz" \
+            "dnsmasq-${VERSION}-linux-amd64.tar.gz.sha256" \
+            --title "dnsmasq ${VERSION}" \
+            --notes "Auto-built dnsmasq ${VERSION} from official source: https://thekelleys.org.uk/dnsmasq/dnsmasq-${VERSION}.tar.xz"
