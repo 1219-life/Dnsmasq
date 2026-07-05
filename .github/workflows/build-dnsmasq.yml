@@ -9,25 +9,17 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build dnsmasq latest
+  detect:
+    name: Detect latest dnsmasq version
     runs-on: ubuntu-24.04
 
-    steps:
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            xz-utils \
-            pkg-config \
-            nettle-dev \
-            libidn2-dev \
-            libdbus-1-dev \
-            libnetfilter-conntrack-dev \
-            gettext
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      base_url: ${{ steps.version.outputs.base_url }}
+      release_exists: ${{ steps.release_check.outputs.exists }}
 
+    steps:
       - name: Detect latest dnsmasq version
         id: version
         shell: bash
@@ -36,24 +28,25 @@ jobs:
 
           BASE_URL="https://thekelleys.org.uk/dnsmasq"
 
-          latest_file="$(curl -fsSL "$BASE_URL/" | grep -oE 'LATEST_IS_[0-9]+\.[0-9]+[^"< ]*' | head -n1)"
+          latest_file="$(curl -fsSL "$BASE_URL/" | grep -oE 'LATEST_IS_[0-9]+\.[0-9]+[^"< ]*' | head -n1 || true)"
           version="${latest_file#LATEST_IS_}"
 
-          if [ -z "$version" ]; then
+          if [ -z "$latest_file" ] || [ -z "$version" ]; then
             echo "Failed to detect latest dnsmasq version"
             exit 1
           fi
 
           echo "Latest dnsmasq version: $version"
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
 
       - name: Check release exists
         id: release_check
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -61,79 +54,218 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists, skip build and release."
+            echo "Release $TAG already exists, skip build."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG does not exist, continue."
+            echo "Release $TAG does not exist, continue build."
           fi
 
-      - name: Download source
-        if: steps.release_check.outputs.exists == 'false'
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    needs: detect
+    if: needs.detect.outputs.release_exists == 'false'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            arch: amd64
+            artifact_name: linux-amd64
+            docker_platform: linux/amd64
+
+          - os: ubuntu-24.04
+            platform: linux
+            arch: arm64
+            artifact_name: linux-arm64
+            docker_platform: linux/arm64
+
+          - os: macos-14
+            platform: macos
+            arch: arm64
+            artifact_name: macos-arm64
+            docker_platform: ""
+
+          - os: macos-13
+            platform: macos
+            arch: amd64
+            artifact_name: macos-amd64
+            docker_platform: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Set up QEMU
+        if: matrix.platform == 'linux'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: matrix.platform == 'linux'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos'
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ steps.version.outputs.version }}"
-          BASE_URL="${{ steps.version.outputs.base_url }}"
+          brew update
+          brew install pkg-config nettle gettext libidn2
+
+      - name: Download source on macOS
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.detect.outputs.version }}"
+          BASE_URL="${{ needs.detect.outputs.base_url }}"
 
           curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz"
-          curl -fLO "$BASE_URL/dnsmasq-${VERSION}.tar.xz.asc" || true
-
           tar -xf "dnsmasq-${VERSION}.tar.xz"
 
-      - name: Build dnsmasq
-        if: steps.release_check.outputs.exists == 'false'
+      - name: Build dnsmasq on Linux with Docker
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.detect.outputs.version }}"
+          BASE_URL="${{ needs.detect.outputs.base_url }}"
+          ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          DOCKER_PLATFORM="${{ matrix.docker_platform }}"
+
+          mkdir -p "out-${ARTIFACT_NAME}"
+
+          docker run --rm \
+            --platform "$DOCKER_PLATFORM" \
+            -v "$PWD/out-${ARTIFACT_NAME}:/out" \
+            debian:12 \
+            bash -lc "
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y \
+                build-essential \
+                curl \
+                xz-utils \
+                pkg-config \
+                nettle-dev \
+                libidn2-dev \
+                libdbus-1-dev \
+                libnetfilter-conntrack-dev \
+                gettext \
+                ca-certificates
+
+              curl -fLO '${BASE_URL}/dnsmasq-${VERSION}.tar.xz'
+              tar -xf 'dnsmasq-${VERSION}.tar.xz'
+
+              cd 'dnsmasq-${VERSION}'
+
+              make -j\"\$(nproc)\"
+
+              ./src/dnsmasq --version
+
+              cp src/dnsmasq /out/dnsmasq
+              cp dnsmasq.conf.example /out/dnsmasq.conf.example || true
+              cp CHANGELOG /out/CHANGELOG || true
+              cp COPYING /out/COPYING || true
+              cp COPYING-v3 /out/COPYING-v3 || true
+            "
+
+      - name: Build dnsmasq on macOS
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.detect.outputs.version }}"
           cd "dnsmasq-${VERSION}"
 
-          make -j"$(nproc)"
+          export PATH="/opt/homebrew/opt/gettext/bin:/usr/local/opt/gettext/bin:$PATH"
+          export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig:/opt/homebrew/opt/libidn2/lib/pkgconfig:/usr/local/opt/libidn2/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          make -j"$(sysctl -n hw.ncpu)" \
+            COPTS="-DNO_DBUS -DNO_CONNTRACK -DNO_LUASCRIPT"
+
           ./src/dnsmasq --version
 
       - name: Package artifact
-        if: steps.release_check.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ steps.version.outputs.version }}"
-          mkdir -p dist
+          VERSION="${{ needs.detect.outputs.version }}"
+          PLATFORM="${{ matrix.platform }}"
+          ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          PACKAGE_NAME="dnsmasq-${VERSION}-${ARTIFACT_NAME}"
 
-          cp "dnsmasq-${VERSION}/src/dnsmasq" "dist/dnsmasq"
-          cp "dnsmasq-${VERSION}/dnsmasq.conf.example" "dist/dnsmasq.conf.example" || true
-          cp "dnsmasq-${VERSION}/CHANGELOG" "dist/CHANGELOG" || true
-          cp "dnsmasq-${VERSION}/COPYING" "dist/COPYING" || true
-          cp "dnsmasq-${VERSION}/COPYING-v3" "dist/COPYING-v3" || true
+          mkdir -p "$PACKAGE_NAME"
 
-          tar -C dist -czf "dnsmasq-${VERSION}-linux-amd64.tar.gz" .
+          if [ "$PLATFORM" = "linux" ]; then
+            cp "out-${ARTIFACT_NAME}/dnsmasq" "$PACKAGE_NAME/dnsmasq"
+            cp "out-${ARTIFACT_NAME}/dnsmasq.conf.example" "$PACKAGE_NAME/dnsmasq.conf.example" || true
+            cp "out-${ARTIFACT_NAME}/CHANGELOG" "$PACKAGE_NAME/CHANGELOG" || true
+            cp "out-${ARTIFACT_NAME}/COPYING" "$PACKAGE_NAME/COPYING" || true
+            cp "out-${ARTIFACT_NAME}/COPYING-v3" "$PACKAGE_NAME/COPYING-v3" || true
+          else
+            cp "dnsmasq-${VERSION}/src/dnsmasq" "$PACKAGE_NAME/dnsmasq"
+            cp "dnsmasq-${VERSION}/dnsmasq.conf.example" "$PACKAGE_NAME/dnsmasq.conf.example" || true
+            cp "dnsmasq-${VERSION}/CHANGELOG" "$PACKAGE_NAME/CHANGELOG" || true
+            cp "dnsmasq-${VERSION}/COPYING" "$PACKAGE_NAME/COPYING" || true
+            cp "dnsmasq-${VERSION}/COPYING-v3" "$PACKAGE_NAME/COPYING-v3" || true
+          fi
 
-          sha256sum "dnsmasq-${VERSION}-linux-amd64.tar.gz" > "dnsmasq-${VERSION}-linux-amd64.tar.gz.sha256"
+          chmod +x "$PACKAGE_NAME/dnsmasq"
+
+          tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
+          fi
 
       - name: Upload artifact to Actions
-        if: steps.release_check.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: dnsmasq-${{ steps.version.outputs.version }}-linux-amd64
+          name: dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
           path: |
-            dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
-            dnsmasq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+            dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
+            dnsmasq-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - detect
+      - build
+    if: needs.detect.outputs.release_exists == 'false'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        shell: bash
+        run: |
+          find release-assets -type f -maxdepth 2 -print
 
       - name: Create GitHub Release
-        if: steps.release_check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ needs.detect.outputs.version }}"
+          TAG="${{ needs.detect.outputs.tag }}"
 
           gh release create "$TAG" \
-            "dnsmasq-${VERSION}-linux-amd64.tar.gz" \
-            "dnsmasq-${VERSION}-linux-amd64.tar.gz.sha256" \
+            release-assets/* \
             --title "dnsmasq ${VERSION}" \
             --notes "Auto-built dnsmasq ${VERSION} from official source: https://thekelleys.org.uk/dnsmasq/dnsmasq-${VERSION}.tar.xz"
